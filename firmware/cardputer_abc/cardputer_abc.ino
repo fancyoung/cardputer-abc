@@ -1,5 +1,5 @@
 /*
- * Cardputer-Adv ABC 早教游戏 v1.0.0
+ * Cardputer-Adv ABC 早教游戏 v1.0.1
  *
  * 按字母键播放该字母音频;画面分两段 + 音频驱动:
  *   前 INTRO_MS(念字母名/发音): 大字母 平滑换色 + 弹跳 + 跟响度脉动
@@ -1057,7 +1057,8 @@ void drawSettings() {       // 交互菜单:Enter 移到下一项,◀/▶ 改值
   d.setTextColor(nd ? TFT_GREEN : TFT_RED, TFT_BLACK);
   d.drawString("/audio digit folders: " + String(nd), 8, 112);
   d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  d.drawString("up/dn:move  <,>:change  BkSp:exit", 6, 126);
+  d.setFont(&fonts::Font0);                                   // 小字号 hint:避免底部被 135px 屏下边缘裁切
+  d.drawString("up/dn:move  <,>:change  BkSp:exit", 6, 127);
 }
 
 // 改当前选中行的值(dir=+1/-1)。pack 行循环切包(原地)
@@ -1263,6 +1264,14 @@ void setup() {
   M5Cardputer.begin(cfg, true);
   M5Cardputer.Display.setRotation(1);
   M5Cardputer.Display.setBrightness(BRIGHT_ON);
+  { auto& d = M5Cardputer.Display;                    // 开机立刻显 ABC 屏,免黑屏让娃以为没开机(后面 SD 初始化期间也有得看)
+    d.fillScreen(TFT_BLACK); d.setTextDatum(middle_center);
+    d.setFont(&fonts::FreeSansBold24pt7b); d.setTextSize(1);
+    const uint16_t sc[3] = {TFT_RED, TFT_GREEN, TFT_BLUE}; const char* ss = "ABC";
+    for (int i = 0; i < 3; i++) { d.setTextColor(sc[i], TFT_BLACK); char b[2] = {ss[i], 0}; d.drawString(b, d.width() / 2 - 60 + i * 60, 50); }
+    d.setFont(&fonts::FreeSansBold9pt7b); d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    d.drawString("press any key!", d.width() / 2, 110);
+  }
   M5Cardputer.Speaker.setVolume(volume);
   randomSeed(micros());                               // 表情脸随机:眨眼/动一动/表情键
 
@@ -1296,7 +1305,7 @@ void setup() {
 
   mp3dec = MP3InitDecoder();                           // 数字音频 mp3 解码器(失败则数字目录只能放 wav)
   resolvePack();
-  dumpSDTree(Serial);                                 // 开机打一次 SD 结构到串口(诊断用)
+  // dumpSDTree(Serial);                              // 诊断用:遍历整卡打串口(上千帧很慢)— 正常启动不跑,需要排查时再开
   loadPackFps();
   dingBuf = loadWholeFile(packRoot + "/ding.wav", &dingSize);
   fxBuf = (uint8_t*)malloc(FXCAP);                    // 功能提示音复用缓冲
