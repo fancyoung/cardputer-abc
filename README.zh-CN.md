@@ -4,6 +4,10 @@
 
 📖 **English → [README.md](README.md)**
 
+[![release](https://img.shields.io/github/v/release/fancyoung/cardputer-abc)](https://github.com/fancyoung/cardputer-abc/releases/latest)
+
+> **⬇️ 上手:** 从 [**Releases**](https://github.com/fancyoung/cardputer-abc/releases/latest) 下固件 `.bin` + 现成 SD 包,或用 **M5Burner**(搜 *Cardputer ABC*)刷。SD 包要放进 FAT32 卡——只刷固件不够。
+
 ---
 
 ## 缘起

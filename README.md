@@ -4,7 +4,9 @@
 
 📖 **中文文档 → [README.zh-CN.md](README.zh-CN.md)**
 
-![status](https://img.shields.io/badge/status-on--device%20verified-brightgreen) ![board](https://img.shields.io/badge/board-Cardputer--ADV-blue) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
+[![release](https://img.shields.io/github/v/release/fancyoung/cardputer-abc)](https://github.com/fancyoung/cardputer-abc/releases/latest) ![status](https://img.shields.io/badge/status-on--device%20verified-brightgreen) ![board](https://img.shields.io/badge/board-Cardputer--ADV-blue) ![license](https://img.shields.io/badge/license-Apache--2.0-green)
+
+> **⬇️ Get it running:** download the firmware `.bin` + ready-to-use SD pack from [**Releases**](https://github.com/fancyoung/cardputer-abc/releases/latest), or flash via **M5Burner** (search *Cardputer ABC*). The SD pack goes on a FAT32 card — flashing the firmware alone isn't enough.
 
 ---
 
