@@ -3,13 +3,21 @@ Copyright 2026 siyang
 
 Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-This repository contains the firmware only. It bundles one third-party
-component under its own terms:
+This repository contains the firmware only. It bundles the following
+third-party components under their own terms:
 
 - firmware/cardputer_abc/src/libhelix-mp3 — MP3 decoder by RealNetworks,
-  licensed under the RealNetworks Public Source License (RPSL) / RealNetworks
-  Community Source License (RCSL). See the headers in those files. This
-  component is NOT covered by the Apache License above.
+  licensed under the RealNetworks Public Source License (RPSL) 1.0 /
+  RealNetworks Community Source License (RCSL) 1.0. The full license text is
+  included at firmware/cardputer_abc/src/libhelix-mp3/LICENSE-RPSL.txt, and
+  the original RPSL/RCSL headers are kept intact in each source file. This
+  component is NOT covered by the Apache License above; it remains under the
+  RPSL/RCSL.
+
+- firmware/cardputer_abc/hershey_az.h — letter stroke data derived from the
+  Hershey vector fonts, originally created by Dr. A. V. Hershey. The Hershey
+  fonts are in the public domain; this acknowledgement is provided as a
+  courtesy.
 
 ABC content packs (songs + animation frames + artwork) are distributed
 separately as downloadable resources, not in this repository. Those packs
