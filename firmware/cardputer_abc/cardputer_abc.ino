@@ -1,5 +1,5 @@
 /*
- * Cardputer-Adv ABC 早教游戏 v1.0.1
+ * Cardputer-Adv ABC 早教游戏 v1.1.0
  *
  * 按字母键播放该字母音频;画面分两段 + 音频驱动:
  *   前 INTRO_MS(念字母名/发音): 大字母 平滑换色 + 弹跳 + 跟响度脉动
@@ -113,6 +113,8 @@ Preferences prefs;
 bool     animFx      = true;     // 图片/字母动效开关(设置里 M 切,存 NVS);关=静态不跳不脉动
 char     imgStyle    = 'A';      // 画风(设置里 S 切,存 NVS):'A'=像素 / 'B'=flat;图片在 <字母>/<style>/ 下
 uint8_t  vizMode     = 1;        // 数字播放可视化(设置里改 / Fn+V 快切,存 NVS):0=大数字 1=声波条 2=圆脉冲
+bool     nightMode   = false;    // 夜间/护眼模式:屏全程黑只放音,Esc/Del 弹提示,Fn+Del 进设置改回(存 NVS)
+uint32_t hintUntil   = 0;        // 夜间模式提示显示截止时刻(到点自动熄屏)
 int      selRow      = 0;        // 设置菜单光标行(◀▶ 移动,Enter 改)
 
 // 音频驱动:实时响度
@@ -642,6 +644,10 @@ void updateDisplay() {
   uint32_t now = millis();
   if (now < volOverlayUntil) return;
   if (state == ST_PAUSED || state == ST_SETTINGS) return;   // 菜单是静态画面,进/选时画一次
+  if (nightMode) {                                          // 夜间模式:屏常黑只放音;Esc/Del 提示显示完自动熄
+    if (hintUntil) { if (now < hintUntil) return; hintUntil = 0; }
+    setBright(0); return;
+  }
 
   if (state == ST_PLAYING || state == ST_GAP) {
     if (finaleMode) { drawFinaleProgress(now); return; }   // 已进合影,锁定到结束
@@ -1037,25 +1043,21 @@ void drawSettings() {       // 交互菜单:Enter 移到下一项,◀/▶ 改值
   d.drawString("SETTINGS", 6, 3);
   d.setFont(&fonts::Font2);
   String packName = packDirs.empty() ? "(none)" : packDisplayName(curPackDir());
-  String vals[6] = {
+  String vals[7] = {
     "motion fx : " + String(animFx ? "on" : "off"),
     "style     : " + String(imgStyle == 'A' ? "A pixel" : "B flat"),
     "digit viz : " + String(vizName()),
     "screen off: " + screenOffLabel(screenOffMs),
     "pick pack : " + packName,
     "USB drive : <,> to enter",                       // 选中按 ◀/▶ → 重启进 U 盘模式
+    "night mode: " + String(nightMode ? "on" : "off"),// 屏全程黑只放音(护眼/睡前)
   };
   int y = 20;
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < 7; i++) {
     bool sel = (i == selRow);
     d.setTextColor(sel ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
     d.drawString(String(sel ? "> " : "  ") + vals[i], 8, y); y += 15;
   }
-  // 数字音频目录数量(扫卡根 /audio/<0-9>;0=按数字键没内容)
-  int nd = 0;
-  for (char c = '0'; c <= '9'; c++) if (SD.exists("/audio/" + String(c))) nd++;
-  d.setTextColor(nd ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  d.drawString("/audio digit folders: " + String(nd), 8, 112);
   d.setTextColor(TFT_DARKGREY, TFT_BLACK);
   d.setFont(&fonts::Font0);                                   // 小字号 hint:避免底部被 135px 屏下边缘裁切
   d.drawString("up/dn:move  <,>:change  BkSp:exit", 6, 127);
@@ -1078,16 +1080,19 @@ void changeRow(int dir) {
     case 5:                                            // U 盘模式:存标志 → 重启进 MSC
       prefs.putBool("usbmsc", true); delay(120); ESP.restart();
       break;
+    case 6:                                            // 夜间模式开关(屏全程黑只放音;退设置后生效)
+      nightMode = !nightMode; prefs.putBool("night", nightMode);
+      break;
   }
 }
 
 void handleSettingsKeys(Keyboard_Class::KeysState& st) {
   if (st.del) { exitSettings(); return; }            // 退格 = 退出
-  if (st.enter) { selRow = (selRow + 1) % 6; drawSettings(); return; }   // Enter = 下一项
+  if (st.enter) { selRow = (selRow + 1) % 7; drawSettings(); return; }   // Enter = 下一项
   for (auto c : st.word) {
-    if (c == ';') { selRow = (selRow + 5) % 6; drawSettings(); return; } // ▲ 上一项
-    if (c == '.') { selRow = (selRow + 1) % 6; drawSettings(); return; } // ▼ 下一项
-    if (c == ' ') { selRow = (selRow + 1) % 6; drawSettings(); return; } // 空格 = 下一项(保留)
+    if (c == ';') { selRow = (selRow + 6) % 7; drawSettings(); return; } // ▲ 上一项
+    if (c == '.') { selRow = (selRow + 1) % 7; drawSettings(); return; } // ▼ 下一项
+    if (c == ' ') { selRow = (selRow + 1) % 7; drawSettings(); return; } // 空格 = 下一项(保留)
     if (c == ',') { changeRow(-1); drawSettings(); return; }             // ◀ = 改值(上一个)
     if (c == '/') { changeRow(+1); drawSettings(); return; }             // ▶ = 改值(下一个)
   }
@@ -1106,7 +1111,8 @@ void enterSettings() {
 void exitSettings() {
   state = ST_IDLE; curLetter = 0; finaleMode = false; finaleStep = 0;
   frameNo = 0; lastFrame = 0;
-  drawIdle();
+  if (nightMode) setBright(0);                         // 夜间模式:退设置即熄屏
+  else drawIdle();
 }
 
 // 切包:写 active.txt(先删再写)+ 重载包级资源。不显 OK/不退出(菜单里原地切)
@@ -1135,9 +1141,20 @@ void afterSetting(const String& msg) {
   if (state == ST_SETTINGS) drawSettings(); else flashMsg(msg);
 }
 
+// 夜间模式提示:点亮屏幕,告诉用户如何进设置改回;~2.5s 后由 updateDisplay 自动熄回
+void drawNightHint() {
+  auto& d = M5Cardputer.Display;
+  setBright(BRIGHT_ON);
+  d.fillScreen(TFT_BLACK); d.setTextDatum(middle_center);
+  d.setFont(&fonts::FreeSansBold9pt7b);
+  d.setTextColor(TFT_CYAN, TFT_BLACK);  d.drawString("Night mode", 120, 48);
+  d.setTextColor(TFT_WHITE, TFT_BLACK); d.drawString("Fn + Del = settings", 120, 80);
+  hintUntil = millis() + 2500;
+}
+
 void handleKeys() {
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) return;
-  setBright(BRIGHT_ON);
+  if (!nightMode) setBright(BRIGHT_ON);               // 夜间模式不点亮(按键只放音)
   lastInteract = millis();                            // 任意键唤醒并重置熄屏倒计时
   auto st = M5Cardputer.Keyboard.keysState();
 
@@ -1152,6 +1169,11 @@ void handleKeys() {
     return;                                             // Fn + 其它键 = 忽略
   }
   if (state == ST_SETTINGS) { handleSettingsKeys(st); return; }   // 设置菜单:方向键导航
+  if (nightMode) {                                    // 夜间模式:普通 Esc/Del → 弹提示(教用户 Fn+Del 进设置改回)
+    bool esc = st.del;
+    for (auto c : st.word) if (c == '`' || c == 0x1b) esc = true;
+    if (esc) { drawNightHint(); return; }
+  }
 
   if (st.enter) { togglePause(); playFx(state == ST_PAUSED ? "pause" : "play"); return; }
   for (auto c : st.word) {
@@ -1263,8 +1285,13 @@ void setup() {
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
   M5Cardputer.Display.setRotation(1);
-  M5Cardputer.Display.setBrightness(BRIGHT_ON);
-  { auto& d = M5Cardputer.Display;                    // 开机立刻显 ABC 屏,免黑屏让娃以为没开机(后面 SD 初始化期间也有得看)
+  prefs.begin("abc", false);                          // NVS 提前:开机即判夜间模式 / U 盘模式
+  nightMode = prefs.getBool("night", false);
+  if (nightMode) {
+    setBright(0);                                      // 夜间模式:开机直接黑,不亮屏(护眼/睡前)
+  } else {
+    M5Cardputer.Display.setBrightness(BRIGHT_ON);
+    auto& d = M5Cardputer.Display;                     // 开机立刻显 ABC 屏,免黑屏让娃以为没开机(SD 初始化期间也有得看)
     d.fillScreen(TFT_BLACK); d.setTextDatum(middle_center);
     d.setFont(&fonts::FreeSansBold24pt7b); d.setTextSize(1);
     const uint16_t sc[3] = {TFT_RED, TFT_GREEN, TFT_BLUE}; const char* ss = "ABC";
@@ -1296,7 +1323,6 @@ void setup() {
     }
   }
 
-  prefs.begin("abc", false);                          // NVS(提前到这,先判 U 盘模式标志)
   if (prefs.getBool("usbmsc", false)) {                // 设置里选了 U 盘模式 → 重启进这里
     prefs.putBool("usbmsc", false);                    // 一次性:清标志,退出重启即回正常
     enterUsbMsc();
@@ -1314,7 +1340,7 @@ void setup() {
   imgStyle = (char)prefs.getUChar("style", (uint8_t)'A');   // 画风:默认 A 像素
   if (imgStyle != 'A' && imgStyle != 'B') imgStyle = 'A';
   vizMode = prefs.getUChar("viz", 1); if (vizMode > 2) vizMode = 1;   // 数字可视化:默认声波条(不与标题/数字键重影)
-  drawIdle();
+  if (!nightMode) drawIdle();                          // 夜间模式开机保持黑屏
   lastInteract = millis();                            // 开机待机也起熄屏倒计时
 }
 
