@@ -26,7 +26,7 @@ Two modes share one device:
   3. plays a per-word **motion** animation, then an **effect** animation on the 3-beat action words (bite ×3, siren ×3, …),
   4. ends with an ~8s group photo → slow rainbow standby screen + a peeking **standby face**.
   - Any new letter key interrupts instantly (the core experience for a key-mashing toddler).
-- **Music-player mode (number keys 0–9)** — each digit plays a folder `/audio/<n>/` of your own audio (`mp3 / wav / m4a / aac / flac / ogg / opus`). MP3 is decoded on-device with libhelix. Shows the embedded **cover art** (ID3 APIC, or a `cover.jpg` fallback) + **title** (ID3 tag or filename) + a switchable **visualizer** (big number / bars / pulse). `◀ ▶` skip tracks.
+- **Music-player mode (number keys 0–9)** — each digit plays a folder `/audio/<n>/` of your own audio (`mp3 / wav / m4a / aac / flac / ogg / opus`). MP3 is decoded on-device with libhelix. Shows the embedded **cover art** (ID3 APIC, or a `cover.jpg` fallback) + **title** (ID3 tag or filename) + a switchable FFT **visualizer** (spectrum / radial spectrum / breathing orb / none). `◀ ▶` skip tracks.
 
 Non-letter keys give a quick **"ding"** on a separate audio channel — feedback without interrupting playback.
 
@@ -35,7 +35,10 @@ Non-letter keys give a quick **"ding"** on a separate audio channel — feedback
 - **No PSRAM.** The Cardputer-ADV is a Stamp-S3A (**ESP32-S3FN8, 8 MB flash, _no_ PSRAM**). Audio is **streamed from SD**, not loaded whole into memory.
 - **Content packs are first-class.** A "version" = a directory `/packs/<name>/`. Different voice / accent / language is just a different folder. Switch in the on-device settings menu or by editing one line in `/packs/active.txt` — the firmware needs no code changes to add or swap content.
 - **Animations are pre-rendered flip frames.** The hard pixel work is done on a computer (Pillow); the device just flips through 240×135 JPGs.
-- **USB drive mode (MSC).** Expose the SD card over USB to drag files without pulling the card (see below).
+- **USB drive mode (MSC).** Expose the SD card over USB to drag files without pulling the card (see below) — no microSD card reader needed.
+- **Night mode (eye-care / bedtime).** The screen stays off and any key just plays audio; re-open the settings menu to switch back.
+- **English / Chinese UI.** Switch the whole settings interface language on-device (CJK font built in).
+- **FFT music visualizers.** A self-contained 256-point FFT drives a real spectrum, a radial spectrum, or a breathing orb.
 - **Power saving.** After a song ends the backlight dims, then turns off; any key wakes it. A standby face peeks out and gets drowsy before sleep.
 
 ## Hardware
@@ -63,7 +66,7 @@ Non-letter keys give a quick **"ding"** on a separate audio channel — feedback
 | Fn + V | Quick-cycle the player visualizer |
 | Any other key | "ding" |
 
-**Settings menu** (navigate with `;`▲ `.`▼ or Enter; change a value with `,`◀ `/`▶; Backspace exits): motion fx · image style (pixel / flat) · player visualizer · screen-off timeout (saved to NVS) · pick content pack · **USB drive mode**.
+**Settings menu** (navigate with `;`▲ `.`▼; **Enter** selects/activates; Backspace exits; everything persists to NVS): language (EN/中文) · content pack · art style · motion fx · **night mode** · player visualizer · screen-off timeout · USB drive mode · SD info · restore defaults. List choices (content pack, language) open a popup picker; night mode / motion fx open an explainer dialog.
 
 ## Build & flash
 
