@@ -115,6 +115,16 @@ char     imgStyle    = 'A';      // 画风(设置里 S 切,存 NVS):'A'=像素 /
 uint8_t  vizMode     = 1;        // 数字播放可视化(设置里改 / Fn+V 快切,存 NVS):0=大数字 1=声波条 2=圆脉冲
 bool     nightMode   = false;    // 夜间/护眼模式:屏全程黑只放音,Esc/Del 弹提示,Fn+Del 进设置改回(存 NVS)
 uint32_t hintUntil   = 0;        // 夜间模式提示显示截止时刻(到点自动熄屏)
+uint8_t  uiLang      = 0;        // 界面语言:0=English 1=中文(存 NVS "lang")
+int      settingsTop = 0;        // 设置菜单滚动:首个可见行索引
+uint8_t  pickKind    = 0;        // 弹窗:0=无 1=内容包 2=语言 3=SD卡信息 4=开关说明弹窗
+uint8_t  dlgKind     = 0;        // 开关弹窗:0=夜间 1=动效
+bool     dlgVal      = false;    // 开关弹窗的待定值
+int      pickSel     = 0, pickTop = 0;
+std::vector<String> pickOpts;    // 当前弹窗选项
+static const int SET_ROWS = 10;  // 设置项总数
+static const int SET_VIS  = 6;   // 同屏显示行数(其余滚动)
+// T()/setMenuFont() 的定义在 setBright() 之后(FaceExpr 枚举之后),避免 Arduino 自动原型插到类型定义之前
 int      selRow      = 0;        // 设置菜单光标行(◀▶ 移动,Enter 改)
 
 // 音频驱动:实时响度
@@ -179,6 +189,10 @@ String styleDir() { return letterDir() + "/" + imgStyle; }
 String baseName(const String& n) { int s = n.lastIndexOf('/'); return s >= 0 ? n.substring(s + 1) : n; }
 
 void setBright(uint8_t b) { if (b != curBright) { curBright = b; M5Cardputer.Display.setBrightness(b); } }
+
+// 界面语言帮助(放在 FaceExpr 等类型定义之后)
+static inline const char* T(const char* en, const char* zh) { return uiLang ? zh : en; }
+static inline void setMenuFont(lgfx::LovyanGFX* g) { if (uiLang) g->setFont(&fonts::efontCN_16); else g->setFont(&fonts::Font2); }
 
 uint16_t hsv565(float h) {  // h:0..360
   float x = 1 - fabsf(fmodf(h / 60.0f, 2) - 1), r, g, b;
@@ -263,16 +277,22 @@ void resolvePack() {
 }
 
 // 读当前包 pack.txt 第2行可选 "fps=N"(或纯数字)→ 设翻页速度;无则用默认。包自定义,固件不写死
-void loadPackFps() {
+void loadPackFps() {                                 // 读 pack.txt:帧率 + 画风默认;NVS 覆盖优先
   frameMs = FRAME_MS_DEFAULT;
+  char packStyle = 'B';                              // 包默认扁平;包可用 style=A 声明像素
   File f = SD.open(packRoot + "/pack.txt");
-  if (!f || f.isDirectory()) { if (f) f.close(); return; }
-  f.readStringUntil('\n');                          // 第1行=显示名,跳过
-  String l2 = f.readStringUntil('\n'); f.close(); l2.trim();
-  int eq = l2.indexOf('=');
-  if (eq >= 0) l2 = l2.substring(eq + 1);
-  int fps = l2.toInt();
-  if (fps >= 1 && fps <= 60) frameMs = 1000 / fps;
+  if (f && !f.isDirectory()) {
+    f.readStringUntil('\n');                         // 第1行=显示名,跳过
+    while (f.available()) {
+      String l = f.readStringUntil('\n'); l.trim(); if (l.length() == 0) continue;
+      if (l.startsWith("style=")) { char s = l.charAt(6); packStyle = (s == 'A' || s == 'a') ? 'A' : 'B'; }
+      else { int eq = l.indexOf('='); int fps = (eq >= 0 ? l.substring(eq + 1) : l).toInt();  // fps=N 或裸数字
+             if (fps >= 1 && fps <= 60) frameMs = 1000 / fps; }
+    }
+  }
+  if (f) f.close();
+  uint8_t nv = prefs.getUChar("style", 0);           // 用户在设置里改过则用 NVS,否则用包默认
+  imgStyle = (nv == 'A' || nv == 'B') ? (char)nv : packStyle;
 }
 
 // ---------- 画面 ----------
@@ -352,50 +372,71 @@ void drawLetterStatic(uint16_t col) {
   d.drawString(buf, d.width() / 2, d.height() / 2);
 }
 
+// ——— 轻量 FFT 频谱(256 点,给数字播放器可视化;fft256/computeSpectrum 实现在下方 feedLevel 附近)———
+#define FFT_N 256
+#define FFT_BANDS 16
+static float fftRe[FFT_N], fftIm[FFT_N];
+float bandTarget[FFT_BANDS] = {0};         // FFT 算出的目标高度(0..1)
+float bandLvl[FFT_BANDS]    = {0};         // 每帧平滑后高度(viz 画用)
+static const float FFT_SCALE = 60000.0f;   // 归一化分母:条整体太短/太长就调这个
+
 // ——— 数字音频「播放器界面」:左封面方块 + 顶标题 + 右侧 viz 区 ———
 // 封面+标题画一次(切歌重画),viz 只重画自己那块,互不擦除。
 
-// viz 取色:固定亮色调色板缓慢轮换(避开 hsv 纯蓝那种发暗的色,小孩看着亮)
-uint16_t vizCol(uint32_t now) {
-  static const uint16_t PAL[] = {0x07FF, 0xFFE0, 0x07E0, 0xFD20, 0xF81F, 0xFFFF};  // 青/黄/绿/橙/品红/白
-  return PAL[(now / 1400) % 6];
+// 全部画进 canvas(双缓冲,无闪烁)。区域已由 drawPlayer 的 fillScreen 清过。
+void updateBands() {                       // 每帧:快攻慢落,频谱平滑
+  for (int b = 0; b < FFT_BANDS; b++) {
+    if (bandTarget[b] > bandLvl[b]) bandLvl[b] = bandTarget[b];
+    else bandLvl[b] *= 0.86f;
+  }
 }
-
-// 全部画进 canvas(双缓冲,无闪烁)。区域已由 drawPlayer 的 fillScreen 清过,各 viz 不再单独填黑。
-// viz: 声波条
-void vizBars(lgfx::LovyanGFX* g, uint32_t now, int rx, int ry, int rw, int rh) {
-  float lv = levelSmooth; if (lv > 1) lv = 1;
-  uint16_t col = vizCol(now);
-  const int N = 10, gap = 4;
-  int bw = (rw - (N - 1) * gap) / N; if (bw < 3) bw = 3;
-  int x0 = rx + (rw - (N * bw + (N - 1) * gap)) / 2;
-  int baseY = ry + rh - 2;
+uint16_t dim565(uint16_t c, int num, int den) {    // RGB565 调暗(做柔光晕)
+  int r = (c >> 11) & 0x1F, g = (c >> 5) & 0x3F, b = c & 0x1F;
+  return ((r * num / den) << 11) | ((g * num / den) << 5) | (b * num / den);
+}
+// viz: 频谱条(真 FFT 16 段,跨频段渐变色)
+void vizSpectrum(lgfx::LovyanGFX* g, uint32_t now, int rx, int ry, int rw, int rh) {
+  const int N = FFT_BANDS, gap = 2;
+  int bw = (rw - (N - 1) * gap) / N; if (bw < 2) bw = 2;
+  int x0 = rx + (rw - (N * bw + (N - 1) * gap)) / 2, baseY = ry + rh - 2;
   for (int i = 0; i < N; i++) {
-    float ph = sinf(now * 0.012f + i * 0.7f) * 0.5f + 0.5f;
-    int h = (int)(6 + lv * (rh - 12) * (0.35f + 0.65f * ph));
+    int h = (int)(2 + bandLvl[i] * (rh - 6));
+    uint16_t col = hsv565(fmodf(200 + i * 200.0f / N + now * 0.03f, 360));
     g->fillRect(x0 + i * (bw + gap), baseY - h, bw, h, col);
   }
 }
-
-// viz: 圆脉冲(数字在中心)
-void vizPulse(lgfx::LovyanGFX* g, uint32_t now, int rx, int ry, int rw, int rh) {
-  float lv = levelSmooth; if (lv > 1) lv = 1;
-  uint16_t col = vizCol(now);
+// viz: 环形频谱(16 段镜像成一圈、向外脉动、慢转)
+void vizRadial(lgfx::LovyanGFX* g, uint32_t now, int rx, int ry, int rw, int rh) {
   int cx = rx + rw / 2, cy = ry + rh / 2;
-  int rmax = (rw < rh ? rw : rh) / 2 - 5;
-  int r = (int)(rmax * 0.42f + lv * rmax * 0.58f);
-  g->drawCircle(cx, cy, r + 5, col);
-  g->fillCircle(cx, cy, r, col);
-  g->setTextDatum(middle_center); g->setFont(&fonts::FreeSansBold18pt7b);
-  g->setTextColor(TFT_BLACK, col);
-  char b[2] = {curLetter, 0}; g->drawString(b, cx, cy);
+  int r0 = (rw < rh ? rw : rh) / 2 - 20; if (r0 < 8) r0 = 8;
+  const int M = FFT_BANDS * 2;
+  for (int s = 0; s < M; s++) {
+    int i = s < FFT_BANDS ? s : (M - 1 - s);
+    float ang = (s / (float)M) * 2 * 3.14159265f + now * 0.0004f;
+    float ca = cosf(ang), sa = sinf(ang);
+    int len = (int)(3 + bandLvl[i] * (r0 * 0.9f));
+    uint16_t col = hsv565(fmodf(s * 360.0f / M + now * 0.02f, 360));
+    g->drawLine(cx + ca * r0, cy + sa * r0, cx + ca * (r0 + len), cy + sa * (r0 + len), col);
+    g->drawLine(cx + ca * r0 + 1, cy + sa * r0, cx + ca * (r0 + len) + 1, cy + sa * (r0 + len), col);
+  }
+  if (curLetter) {
+    g->setTextDatum(middle_center); g->setFont(&fonts::FreeSansBold18pt7b);
+    g->setTextColor(TFT_WHITE, TFT_BLACK); char b[2] = {curLetter, 0}; g->drawString(b, cx, cy);
+  }
 }
-
-// viz: 大数字(缓变色)
-void vizNumber(lgfx::LovyanGFX* g, uint32_t now, int rx, int ry, int rw, int rh) {
-  g->setTextDatum(middle_center); g->setFont(&fonts::FreeSansBold24pt7b);
-  g->setTextColor(vizCol(now), TFT_BLACK);
-  char b[2] = {curLetter, 0}; g->drawString(b, rx + rw / 2, ry + rh / 2);
+// viz: 呼吸光球(随响度缩放 + 缓变色 + 柔光晕)
+void vizOrb(lgfx::LovyanGFX* g, uint32_t now, int rx, int ry, int rw, int rh) {
+  float lv = levelSmooth; if (lv > 1) lv = 1;
+  int cx = rx + rw / 2, cy = ry + rh / 2;
+  int rmax = (rw < rh ? rw : rh) / 2 - 4;
+  int r = (int)(rmax * 0.38f + lv * rmax * 0.55f);
+  uint16_t col = hsv565(fmodf(now * 0.025f, 360));
+  for (int k = 4; k >= 1; k--) g->fillCircle(cx, cy, r + k * 3, dim565(col, 5 - k, 8));
+  g->fillCircle(cx, cy, r, col);
+  if (curLetter) {
+    g->setTextDatum(middle_center); g->setFont(&fonts::FreeSansBold18pt7b);
+    g->setTextColor(TFT_BLACK, col); char b[2] = {curLetter, 0}; g->drawString(b, cx, cy);
+  }
 }
 
 // 标题(中文 efont,UTF-8 安全截断)+ 第几首,画进 g
@@ -425,9 +466,11 @@ void drawPlayer(uint32_t now) {
     coverSprite.pushSprite(g, 6, 28);
     rx = 92; rw = 142;
   } else { rx = 6; rw = 228; }                        // 无封面:viz 占整块
-  if (vizMode == 1)      vizBars(g, now, rx, ry, rw, rh);
-  else if (vizMode == 2) vizPulse(g, now, rx, ry, rw, rh);
-  else                   vizNumber(g, now, rx, ry, rw, rh);
+  updateBands();
+  if (vizMode == 1)      vizSpectrum(g, now, rx, ry, rw, rh);
+  else if (vizMode == 2) vizRadial(g, now, rx, ry, rw, rh);
+  else if (vizMode == 3) vizOrb(g, now, rx, ry, rw, rh);
+  // vizMode == 0 = 无:不画(只剩封面 + 标题)
   if (haveCanvas) canvas.pushSprite(0, 0);
 }
 
@@ -609,8 +652,9 @@ void drawAbcIdle() {
     d.setTextColor(PALETTE[(frameNo + i) % PALETTE_N], TFT_BLACK);
     d.drawString(s[i], d.width() / 2 - 60 + i * 60, 50);
   }
-  d.setFont(&fonts::FreeSansBold9pt7b); d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  d.drawString("press any key!", d.width() / 2, 110);
+  d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  if (uiLang) { d.setFont(&fonts::efontCN_16); d.drawString("按任意键!", d.width() / 2, 110); }
+  else { d.setFont(&fonts::FreeSansBold9pt7b); d.drawString("press any key!", d.width() / 2, 110); }
 }
 
 void drawIdle() {           // 一次性入口(开机/退设置/选包后):回到 ABC 引导屏
@@ -631,8 +675,9 @@ void drawPaused() {
 void drawVolume() {
   auto& d = M5Cardputer.Display;
   d.fillScreen(TFT_BLACK); d.setTextDatum(middle_center);
-  d.setFont(&fonts::FreeSansBold9pt7b); d.setTextColor(TFT_WHITE, TFT_BLACK);
-  d.drawString("VOLUME", d.width() / 2, 28);
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  if (uiLang) d.setFont(&fonts::efontCN_16); else d.setFont(&fonts::FreeSansBold9pt7b);
+  d.drawString(T("VOLUME", "音量"), d.width() / 2, 28);
   const int n = 10, bw = 16, gap = 5, h = 34;
   int on = (volume - 30) * n / (255 - 30);
   int total = n * bw + (n - 1) * gap, x0 = (d.width() - total) / 2, y = 70;
@@ -845,8 +890,9 @@ void startLetter(char c) {
     d.fillScreen(TFT_BLACK); d.setTextDatum(middle_center);
     d.setFont(&fonts::FreeSansBold24pt7b); d.setTextColor(TFT_DARKGREY, TFT_BLACK);
     char b[2] = {c, 0}; d.drawString(b, 120, 50);
-    d.setFont(&fonts::Font2); d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    d.drawString("no audio here", 120, 100);
+    d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    if (uiLang) d.setFont(&fonts::efontCN_16); else d.setFont(&fonts::Font2);
+    d.drawString(T("no audio here", "这里没有音频"), 120, 100);
     state = ST_IDLE; curLetter = 0; idleSince = millis(); lastInteract = idleSince;
     return;
   }
@@ -880,6 +926,43 @@ void startLetter(char c) {
 }
 
 // 把一块 PCM 的幅度并入 viz/重音状态
+void fft256() {                            // 原地 radix-2 复数 FFT(宏/全局见 viz 区前)
+  for (int i = 1, j = 0; i < FFT_N; i++) {
+    int bit = FFT_N >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { float t = fftRe[i]; fftRe[i] = fftRe[j]; fftRe[j] = t; t = fftIm[i]; fftIm[i] = fftIm[j]; fftIm[j] = t; }
+  }
+  for (int len = 2; len <= FFT_N; len <<= 1) {
+    float ang = -2.0f * 3.14159265f / len, wr = cosf(ang), wi = sinf(ang);
+    for (int i = 0; i < FFT_N; i += len) {
+      float cr = 1, ci = 0;
+      for (int k = 0; k < len / 2; k++) {
+        int a = i + k, b = a + len / 2;
+        float vr = fftRe[b] * cr - fftIm[b] * ci, vi = fftRe[b] * ci + fftIm[b] * cr;
+        fftRe[b] = fftRe[a] - vr; fftIm[b] = fftIm[a] - vi;
+        fftRe[a] += vr;           fftIm[a] += vi;
+        float ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+}
+
+void computeSpectrum(int16_t* p, int samples) {   // 取一窗 → Hann → FFT → 16 段 → bandTarget[]
+  if (samples < FFT_N) return;
+  for (int i = 0; i < FFT_N; i++) {
+    float w = 0.5f - 0.5f * cosf(2.0f * 3.14159265f * i / (FFT_N - 1));
+    fftRe[i] = p[i] * w; fftIm[i] = 0;
+  }
+  fft256();
+  for (int b = 0; b < FFT_BANDS; b++) {           // 低频区线性 16 段(bin 1..65,音乐能量主要在这)
+    int lo = 1 + b * 4, hi = lo + 4; float m = 0;
+    for (int k = lo; k < hi; k++) m += sqrtf(fftRe[k] * fftRe[k] + fftIm[k] * fftIm[k]);
+    float v = (m / 4) / FFT_SCALE; if (v > 1) v = 1;
+    bandTarget[b] = v;
+  }
+}
+
 void feedLevel(int16_t* p, int samples) {
   uint32_t sum = 0; int cnt = 0;
   for (int i = 0; i < samples; i += 8) { sum += abs(p[i]); cnt++; }
@@ -888,6 +971,7 @@ void feedLevel(int16_t* p, int samples) {
   if (lv > levelSmooth) levelSmooth = lv; else levelSmooth = levelSmooth * 0.85f + lv * 0.15f;
   if (amp > beatAvg * 1.6f && amp > 1200) beatHit = true;
   beatAvg = beatAvg * 0.9f + amp * 0.1f;
+  computeSpectrum(p, samples);
 }
 
 void pumpMp3() {
@@ -1021,9 +1105,9 @@ String curPackDir() { return packRoot.substring(String("/packs/").length()); }
 
 // 熄屏档位显示名(30s / 1min / never)
 String screenOffLabel(uint32_t ms) {
-  if (ms == 0) return "never";
-  if (ms % 60000 == 0) return String(ms / 60000) + "min";
-  return String(ms / 1000) + "s";
+  if (ms == 0) return T("never", "永不");
+  if (ms % 60000 == 0) return String(ms / 60000) + T("min", "分");
+  return String(ms / 1000) + T("s", "秒");
 }
 
 // 按 0 在预设档位间轮换熄屏时长,存 NVS
@@ -1036,65 +1120,203 @@ void cycleScreenOff() {
   lastInteract = millis();                           // 调完重置倒计时,别立刻黑
 }
 
-void drawSettings() {       // 交互菜单:Enter 移到下一项,◀/▶ 改值,退格退出
+// 通用开关弹窗(夜间/动效):顶部选 开/关,下面说明;◀▶ 选,Enter 确定,Del 返回
+void drawToggleDialog() {
   auto& d = M5Cardputer.Display;
   d.fillScreen(TFT_BLACK); d.setTextDatum(top_left);
-  d.setFont(&fonts::FreeSansBold9pt7b); d.setTextColor(TFT_CYAN, TFT_BLACK);
-  d.drawString("SETTINGS", 6, 3);
-  d.setFont(&fonts::Font2);
-  String packName = packDirs.empty() ? "(none)" : packDisplayName(curPackDir());
-  String vals[7] = {
-    "motion fx : " + String(animFx ? "on" : "off"),
-    "style     : " + String(imgStyle == 'A' ? "A pixel" : "B flat"),
-    "digit viz : " + String(vizName()),
-    "screen off: " + screenOffLabel(screenOffMs),
-    "pick pack : " + packName,
-    "USB drive : <,> to enter",                       // 选中按 ◀/▶ → 重启进 U 盘模式
-    "night mode: " + String(nightMode ? "on" : "off"),// 屏全程黑只放音(护眼/睡前)
-  };
-  int y = 20;
-  for (int i = 0; i < 7; i++) {
-    bool sel = (i == selRow);
-    d.setTextColor(sel ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
-    d.drawString(String(sel ? "> " : "  ") + vals[i], 8, y); y += 15;
+  d.setTextColor(TFT_CYAN, TFT_BLACK);
+  if (uiLang) d.setFont(&fonts::efontCN_16); else d.setFont(&fonts::FreeSansBold9pt7b);
+  d.drawString(dlgKind == 0 ? T("Night mode", "夜间模式") : T("Motion fx", "动效"), 6, 4);
+  // 顶部 开/关 选择(光标指向待定值)
+  if (uiLang) d.setFont(&fonts::efontCN_16); else d.setFont(&fonts::Font2);
+  d.setTextColor(TFT_GREEN, TFT_BLACK); d.drawString(">", dlgVal ? 2 : 78, 30);
+  d.setTextColor(dlgVal ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);  d.drawString(T("on", "开"), 16, 30);
+  d.setTextColor(!dlgVal ? TFT_GREEN : TFT_YELLOW, TFT_BLACK); d.drawString(T("off", "关"), 92, 30);
+  // 说明
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  if (dlgKind == 0) {
+    if (uiLang) { d.drawString("屏全黑只放声音,护眼/睡前", 6, 58);
+      d.setTextColor(TFT_YELLOW, TFT_BLACK); d.drawString("要亮屏:重进设置(Fn+Del)", 6, 82); }
+    else { d.drawString("Screen off, audio only.", 6, 58);
+      d.setTextColor(TFT_YELLOW, TFT_BLACK); d.drawString("Wake: re-open settings.", 6, 82); }
+  } else {
+    if (uiLang) { d.drawString("字母/图片的轻微动画", 6, 58); d.drawString("关掉则静止,更安静", 6, 82); }
+    else { d.drawString("Subtle letter/image motion.", 6, 58); d.drawString("Off = everything static.", 6, 82); }
   }
   d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  d.setFont(&fonts::Font0);                                   // 小字号 hint:避免底部被 135px 屏下边缘裁切
-  d.drawString("up/dn:move  <,>:change  BkSp:exit", 6, 127);
+  if (uiLang) { d.setFont(&fonts::efontCN_16); d.drawString("<,> 选  Enter 确定  Del 返回", 6, 116); }
+  else { d.setFont(&fonts::Font0); d.drawString("<,>:choose  Enter:ok  Del:back", 6, 116); }
+}
+
+void openToggleDialog(uint8_t kind) {
+  pickKind = 4; dlgKind = kind;
+  dlgVal = (kind == 0) ? nightMode : animFx;
+  drawToggleDialog();
+}
+
+// ——— 弹窗 picker(选内容包 / 选语言 / SD 卡信息):全屏列表,上下选 + Enter 确定 ———
+void drawPicker() {
+  if (pickKind == 4) { drawToggleDialog(); return; }
+  auto& d = M5Cardputer.Display;
+  d.fillScreen(TFT_BLACK); d.setTextDatum(top_left);
+  d.setTextColor(TFT_CYAN, TFT_BLACK);
+  if (uiLang) d.setFont(&fonts::efontCN_16); else d.setFont(&fonts::FreeSansBold9pt7b);   // 弹窗标题中文也要 CJK 字体
+  d.drawString(pickKind == 1 ? T("Pick pack", "选内容包") : pickKind == 2 ? T("Language", "选语言") : T("Digit-key audio", "数字键音频"), 6, 3);
+  d.setFont(&fonts::efontCN_16);                               // 弹窗恒用 CJK 字体(选项可能含中文/中文项)
+  int N = pickOpts.size();
+  if (pickSel < pickTop) pickTop = pickSel;
+  if (pickSel >= pickTop + SET_VIS) pickTop = pickSel - SET_VIS + 1;
+  int y = 24;
+  for (int i = pickTop; i < pickTop + SET_VIS && i < N; i++) {
+    d.setTextColor(i == pickSel ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
+    d.drawString(String(i == pickSel ? "> " : "  ") + pickOpts[i], 8, y); y += 15;
+  }
+  if (N > SET_VIS) { int bx = 232, t = 24, h = 88; d.drawRect(bx, t, 4, h, TFT_DARKGREY);
+    d.fillRect(bx, t + h * pickTop / N, 4, h * SET_VIS / N + 1, TFT_GREEN); }
+  d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  if (uiLang) { d.setFont(&fonts::efontCN_16); d.drawString("↑↓ 移动  Enter 确定  Del 返回", 6, 116); }
+  else { d.setFont(&fonts::Font0); d.drawString("up/dn:move  Enter:ok  Del:back", 6, 127); }
+}
+
+void openPicker(uint8_t kind) {
+  pickKind = kind; pickTop = 0; pickOpts.clear();
+  if (kind == 1) {                                   // 选内容包
+    for (auto& n : packDirs) pickOpts.push_back(packDisplayName(n));
+    if (pickOpts.empty()) { pickKind = 0; return; }
+    String cur = curPackDir(); pickSel = 0;
+    for (size_t i = 0; i < packDirs.size(); i++) if (packDirs[i] == cur) { pickSel = i; break; }
+  } else if (kind == 2) {                            // 选语言
+    pickOpts.push_back("English"); pickOpts.push_back("中文");
+    pickSel = uiLang;
+  } else {                                           // 卡信息:数字音频绑定(只读)
+    for (char c = '0'; c <= '9'; c++) {
+      String dir = "/audio/" + String(c);
+      if (!SD.exists(dir)) continue;
+      File g = SD.open(dir); int cnt = 0; String first = "";
+      if (g && g.isDirectory()) {
+        for (File f = g.openNextFile(); f; f = g.openNextFile()) {
+          String n = baseName(f.name()); if (n.startsWith(".")) continue;
+          String ln = n; ln.toLowerCase();
+          if (ln.endsWith(".wav") || ln.endsWith(".mp3") || ln.endsWith(".m4a") || ln.endsWith(".flac")) {
+            if (cnt == 0) first = n; cnt++;
+          }
+        }
+        g.close();
+      }
+      if (cnt) pickOpts.push_back(String(c) + " (" + String(cnt) + "): " + first);   // 数字+数量在前,长文件名只截尾
+    }
+    if (pickOpts.empty()) pickOpts.push_back(T("(no /audio content)", "(无 /audio 内容)"));
+    pickSel = 0;
+  }
+  drawPicker();
+}
+
+void applyPick() {
+  if (pickKind == 1) { if (pickSel < (int)packDirs.size()) applyPack(packDirs[pickSel]); }
+  else if (pickKind == 2) { uiLang = pickSel; prefs.putUChar("lang", uiLang); }
+  pickKind = 0;
+}
+
+void handlePickerKeys(Keyboard_Class::KeysState& st) {
+  if (pickKind == 4) {                                              // 开关说明弹窗(夜间/动效)
+    if (st.del) { pickKind = 0; drawSettings(); return; }           // 取消
+    if (st.enter) {                                                 // 确定:应用待定值
+      pickKind = 0;
+      if (dlgKind == 0) { nightMode = dlgVal; prefs.putBool("night", nightMode);
+                          if (nightMode) exitSettings(); else drawSettings(); }   // 夜间开 → 退设置熄屏
+      else { animFx = dlgVal; prefs.putBool("animfx", animFx); drawSettings(); }
+      return;
+    }
+    for (auto c : st.word) if (c == ',' || c == '/' || c == ';' || c == '.') { dlgVal = !dlgVal; drawToggleDialog(); return; }
+    return;
+  }
+  if (st.del) { pickKind = 0; drawSettings(); return; }            // 退格 = 取消
+  if (st.enter) { applyPick(); drawSettings(); return; }            // Enter = 确定
+  int N = pickOpts.size(); if (N == 0) { pickKind = 0; return; }
+  for (auto c : st.word) {
+    if (c == ';' || c == ',') { pickSel = (pickSel + N - 1) % N; drawPicker(); return; }
+    if (c == '.' || c == '/') { pickSel = (pickSel + 1) % N; drawPicker(); return; }
+  }
+}
+
+void drawSettings() {       // 交互菜单:↑↓ 移动,◀/▶ 改值/打开,退格退出
+  if (pickKind) { drawPicker(); return; }
+  auto& d = M5Cardputer.Display;
+  d.fillScreen(TFT_BLACK); d.setTextDatum(top_left);
+  d.setTextColor(TFT_CYAN, TFT_BLACK);
+  if (uiLang) d.setFont(&fonts::efontCN_16); else d.setFont(&fonts::FreeSansBold9pt7b);   // 标题中文也要 CJK 字体
+  d.drawString(T("SETTINGS", "设置"), 6, 3);
+  setMenuFont(&d);
+  String packName = packDirs.empty() ? T("(none)", "(无)") : packDisplayName(curPackDir());
+  String labels[SET_ROWS] = {            // 语言 → 内容包 → 画风 → 动效 → 夜间 → 可视化/熄屏 → U盘/卡信息/重置
+    T("language", "语言"), T("pick pack", "内容包"), T("style", "画风"), T("motion fx", "动效"),
+    T("night mode", "夜间模式"), T("digit viz", "可视化"), T("screen off", "熄屏"), T("USB drive", "U盘模式"),
+    T("SD info", "SD 卡信息"), T("reset", "恢复默认"),
+  };
+  String values[SET_ROWS] = {
+    uiLang ? "中文" : "English",
+    packName,
+    imgStyle == 'A' ? T("pixel", "像素") : T("flat", "扁平"),
+    animFx ? T("on", "开") : T("off", "关"),
+    nightMode ? T("on", "开") : T("off", "关"),
+    vizName(),
+    screenOffLabel(screenOffMs),
+    T("off", "关"),                      // U盘:当前不在该模式;Enter 重启进入
+    T("view", "查看"),                   // SD 卡信息:Enter 看数字键音频绑定
+    T("go", "执行"),                     // 恢复默认:Enter 执行
+  };
+  if (selRow < settingsTop) settingsTop = selRow;
+  if (selRow >= settingsTop + SET_VIS) settingsTop = selRow - SET_VIS + 1;
+  int y = 24;
+  for (int i = settingsTop; i < settingsTop + SET_VIS && i < SET_ROWS; i++) {
+    bool sel = (i == selRow);
+    d.setTextColor(sel ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
+    if (sel) d.drawString(">", 2, y);                    // 选中光标
+    d.drawString(labels[i], 14, y);                      // 标签列(左对齐)
+    d.drawString(values[i], 120, y);                     // 值列(固定 X,整齐成一竖列)
+    y += 15;
+  }
+  if (SET_ROWS > SET_VIS) { int bx = 232, t = 24, h = 88; d.drawRect(bx, t, 4, h, TFT_DARKGREY);
+    d.fillRect(bx, t + h * settingsTop / SET_ROWS, 4, h * SET_VIS / SET_ROWS + 1, TFT_GREEN); }
+  d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  if (uiLang) { d.setFont(&fonts::efontCN_16); d.drawString("↑↓ 移动  Enter 选择  Del 退出", 6, 116); }
+  else { d.setFont(&fonts::Font0); d.drawString("up/dn:move  Enter:select  Del:exit", 6, 127); }
 }
 
 // 改当前选中行的值(dir=+1/-1)。pack 行循环切包(原地)
 void changeRow(int dir) {
-  switch (selRow) {
-    case 0: animFx = !animFx; prefs.putBool("animfx", animFx); break;
-    case 1: imgStyle = (imgStyle == 'A') ? 'B' : 'A'; prefs.putUChar("style", (uint8_t)imgStyle); break;
-    case 2: vizMode = (vizMode + 3 + dir) % 3; prefs.putUChar("viz", vizMode); break;
-    case 3: cycleScreenOff(); break;
-    case 4:
-      if (!packDirs.empty()) {
-        String cur = curPackDir(); int idx = 0;
-        for (size_t i = 0; i < packDirs.size(); i++) if (packDirs[i] == cur) { idx = i; break; }
-        applyPack(packDirs[(idx + dir + (int)packDirs.size()) % packDirs.size()]);
-      }
-      break;
-    case 5:                                            // U 盘模式:存标志 → 重启进 MSC
-      prefs.putBool("usbmsc", true); delay(120); ESP.restart();
-      break;
-    case 6:                                            // 夜间模式开关(屏全程黑只放音;退设置后生效)
-      nightMode = !nightMode; prefs.putBool("night", nightMode);
+  switch (selRow) {                                    // 顺序对应 drawSettings 的 labels[]
+    case 0: openPicker(2); break;                      // 语言 → 弹窗
+    case 1: openPicker(1); break;                      // 内容包 → 弹窗
+    case 2: imgStyle = (imgStyle == 'A') ? 'B' : 'A'; prefs.putUChar("style", (uint8_t)imgStyle); break;  // 画风(存 NVS 覆盖包默认)
+    case 3: openToggleDialog(1); break;                // 动效 → 开关说明弹窗
+    case 4: openToggleDialog(0); break;                // 夜间模式 → 开关说明弹窗
+    case 5: vizMode = (vizMode + 4 + dir) % 4; prefs.putUChar("viz", vizMode); break;  // 可视化
+    case 6: cycleScreenOff(); break;                   // 熄屏时长
+    case 7: prefs.putBool("usbmsc", true); delay(120); ESP.restart(); break;   // U 盘模式
+    case 8: openPicker(3); break;                      // SD 卡信息(只读)→ 弹窗
+    case 9:                                            // 恢复默认(不动内容包;画风回包默认)
+      animFx = true;     prefs.putBool("animfx", true);
+      vizMode = 1;       prefs.putUChar("viz", 1);
+      screenOffMs = 60000; prefs.putUInt("scroff", 60000);
+      nightMode = false; prefs.putBool("night", false);
+      uiLang = 0;        prefs.putUChar("lang", 0);
+      prefs.remove("style"); loadPackFps();            // 画风清覆盖 → 回内容包默认
+      selRow = 0; settingsTop = 0;
       break;
   }
 }
 
 void handleSettingsKeys(Keyboard_Class::KeysState& st) {
+  if (pickKind) { handlePickerKeys(st); return; }    // 弹窗打开时优先弹窗
   if (st.del) { exitSettings(); return; }            // 退格 = 退出
-  if (st.enter) { selRow = (selRow + 1) % 7; drawSettings(); return; }   // Enter = 下一项
+  if (st.enter) { changeRow(+1); drawSettings(); return; }   // 回车 = 选择/激活当前项(切换/进弹窗/进U盘)
   for (auto c : st.word) {
-    if (c == ';') { selRow = (selRow + 6) % 7; drawSettings(); return; } // ▲ 上一项
-    if (c == '.') { selRow = (selRow + 1) % 7; drawSettings(); return; } // ▼ 下一项
-    if (c == ' ') { selRow = (selRow + 1) % 7; drawSettings(); return; } // 空格 = 下一项(保留)
-    if (c == ',') { changeRow(-1); drawSettings(); return; }             // ◀ = 改值(上一个)
-    if (c == '/') { changeRow(+1); drawSettings(); return; }             // ▶ = 改值(下一个)
+    if (c == ';') { selRow = (selRow + SET_ROWS - 1) % SET_ROWS; drawSettings(); return; } // ▲ 上移
+    if (c == '.') { selRow = (selRow + 1) % SET_ROWS; drawSettings(); return; } // ▼ 下移
+    if (c == ' ') { selRow = (selRow + 1) % SET_ROWS; drawSettings(); return; } // 空格 = 下移
+    if (c == ',') { changeRow(-1); drawSettings(); return; }             // ◀ = 改值(循环类反向)/激活
+    if (c == '/') { changeRow(+1); drawSettings(); return; }             // ▶ = 改值 / 激活
   }
 }
 
@@ -1102,7 +1324,7 @@ void enterSettings() {
   M5Cardputer.Speaker.stop(0);
   if (audioFile) audioFile.close();
   curLetter = 0; finaleMode = false; finaleStep = 0;
-  state = ST_SETTINGS; selRow = 0;
+  state = ST_SETTINGS; selRow = 0; settingsTop = 0; pickKind = 0;
   setBright(BRIGHT_ON);
   scanPacks();
   drawSettings();
@@ -1127,13 +1349,18 @@ void applyPack(const String& dir) {
   playFx("pack");                                  // 确认音(无则退回叮)
 }
 
-const char* vizName() { static const char* V[] = {"number", "bars", "pulse"}; return V[vizMode <= 2 ? vizMode : 0]; }
+const char* vizName() {
+  static const char* EN[] = {"none", "spectrum", "radial", "orb"};
+  static const char* ZH[] = {"无", "频谱", "环形", "光球"};
+  int i = vizMode <= 3 ? vizMode : 1; return uiLang ? ZH[i] : EN[i];
+}
 
 // Fn+键改设置后的反馈:在帮助屏里就重画帮助屏,否则弹一条 1.2s 提示(不打断播放)
 void flashMsg(const String& m) {
   auto& d = M5Cardputer.Display;
   d.fillScreen(TFT_BLACK); d.setTextDatum(middle_center);
-  d.setFont(&fonts::FreeSansBold9pt7b); d.setTextColor(TFT_CYAN, TFT_BLACK);
+  if (uiLang) d.setFont(&fonts::efontCN_16); else d.setFont(&fonts::FreeSansBold9pt7b);
+  d.setTextColor(TFT_CYAN, TFT_BLACK);
   d.drawString(m, 120, 67);
   volOverlayUntil = millis() + 1200;
 }
@@ -1146,9 +1373,9 @@ void drawNightHint() {
   auto& d = M5Cardputer.Display;
   setBright(BRIGHT_ON);
   d.fillScreen(TFT_BLACK); d.setTextDatum(middle_center);
-  d.setFont(&fonts::FreeSansBold9pt7b);
-  d.setTextColor(TFT_CYAN, TFT_BLACK);  d.drawString("Night mode", 120, 48);
-  d.setTextColor(TFT_WHITE, TFT_BLACK); d.drawString("Fn + Del = settings", 120, 80);
+  if (uiLang) d.setFont(&fonts::efontCN_16); else d.setFont(&fonts::FreeSansBold9pt7b);
+  d.setTextColor(TFT_CYAN, TFT_BLACK);  d.drawString(T("Night mode", "夜间模式"), 120, 48);
+  d.setTextColor(TFT_WHITE, TFT_BLACK); d.drawString(T("Fn + Del = settings", "Fn+Del 进设置"), 120, 80);
   hintUntil = millis() + 2500;
 }
 
@@ -1163,7 +1390,7 @@ void handleKeys() {
     if (st.del) { if (state == ST_SETTINGS) exitSettings(); else { scanPacks(); enterSettings(); } return; }   // Fn+退格 = 开/关菜单
     for (auto c : st.word) {
       char lc = (c >= 'A' && c <= 'Z') ? c + 32 : c;
-      if (lc == 'v') { vizMode = (vizMode + 1) % 3; prefs.putUChar("viz", vizMode); afterSetting("digit viz: " + String(vizName())); return; }  // Fn+V 快切 viz
+      if (lc == 'v') { vizMode = (vizMode + 1) % 4; prefs.putUChar("viz", vizMode); afterSetting(String(T("digit viz", "可视化")) + ": " + vizName()); return; }  // Fn+V 快切 viz
       if (c == '/' || c == '?') { if (state != ST_SETTINGS) { scanPacks(); enterSettings(); } return; }   // Fn+? = 设置菜单
     }
     return;                                             // Fn + 其它键 = 忽略
@@ -1287,6 +1514,7 @@ void setup() {
   M5Cardputer.Display.setRotation(1);
   prefs.begin("abc", false);                          // NVS 提前:开机即判夜间模式 / U 盘模式
   nightMode = prefs.getBool("night", false);
+  uiLang = prefs.getUChar("lang", 0); if (uiLang > 1) uiLang = 0;
   if (nightMode) {
     setBright(0);                                      // 夜间模式:开机直接黑,不亮屏(护眼/睡前)
   } else {
@@ -1296,8 +1524,9 @@ void setup() {
     d.setFont(&fonts::FreeSansBold24pt7b); d.setTextSize(1);
     const uint16_t sc[3] = {TFT_RED, TFT_GREEN, TFT_BLUE}; const char* ss = "ABC";
     for (int i = 0; i < 3; i++) { d.setTextColor(sc[i], TFT_BLACK); char b[2] = {ss[i], 0}; d.drawString(b, d.width() / 2 - 60 + i * 60, 50); }
-    d.setFont(&fonts::FreeSansBold9pt7b); d.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    d.drawString("press any key!", d.width() / 2, 110);
+    d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    if (uiLang) { d.setFont(&fonts::efontCN_16); d.drawString("按任意键!", d.width() / 2, 110); }
+    else { d.setFont(&fonts::FreeSansBold9pt7b); d.drawString("press any key!", d.width() / 2, 110); }
   }
   M5Cardputer.Speaker.setVolume(volume);
   randomSeed(micros());                               // 表情脸随机:眨眼/动一动/表情键
@@ -1337,9 +1566,8 @@ void setup() {
   fxBuf = (uint8_t*)malloc(FXCAP);                    // 功能提示音复用缓冲
   screenOffMs = prefs.getUInt("scroff", 60000);
   animFx = prefs.getBool("animfx", true);
-  imgStyle = (char)prefs.getUChar("style", (uint8_t)'A');   // 画风:默认 A 像素
-  if (imgStyle != 'A' && imgStyle != 'B') imgStyle = 'A';
-  vizMode = prefs.getUChar("viz", 1); if (vizMode > 2) vizMode = 1;   // 数字可视化:默认声波条(不与标题/数字键重影)
+  // 画风(imgStyle)不再从 NVS 读:由 loadPackFps() 按内容包 pack.txt 的 style= 决定(默认扁平)
+  vizMode = prefs.getUChar("viz", 1); if (vizMode > 3) vizMode = 1;   // 数字可视化:默认声波条(不与标题/数字键重影)
   if (!nightMode) drawIdle();                          // 夜间模式开机保持黑屏
   lastInteract = millis();                            // 开机待机也起熄屏倒计时
 }
