@@ -1,0 +1,18 @@
+Cardputer ABC
+Copyright 2026 siyang
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository contains the firmware only. It bundles one third-party
+component under its own terms:
+
+- firmware/cardputer_abc/src/libhelix-mp3 — MP3 decoder by RealNetworks,
+  licensed under the RealNetworks Public Source License (RPSL) / RealNetworks
+  Community Source License (RCSL). See the headers in those files. This
+  component is NOT covered by the Apache License above.
+
+ABC content packs (songs + animation frames + artwork) are distributed
+separately as downloadable resources, not in this repository. Those packs
+bundle OpenMoji artwork (CC BY-SA 4.0, https://openmoji.org) and
+Suno-generated songs (subject to Suno's terms of service); see each pack's
+own CREDITS file.

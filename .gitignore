@@ -1,0 +1,4 @@
+build/
+materials/openmoji-cache/
+.superpowers/
+firmware/cardputer_abc/out/
